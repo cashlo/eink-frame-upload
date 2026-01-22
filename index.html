@@ -3,16 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>E-Ink Gallery (Live Preview)</title>
+    <title>E-Ink Gallery</title>
     <style>
         body { font-family: sans-serif; text-align: center; background: #f0f0f0; padding: 20px; }
         .container { max-width: 500px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
         canvas { border: 1px solid #ccc; max-width: 100%; height: auto; margin: 10px 0; }
-        button { background: #007bff; color: white; border: none; padding: 12px 20px; font-size: 16px; border-radius: 5px; cursor: pointer; margin: 5px; width: 100%; }
-        button:disabled { background: #ccc; }
-        button#uploadBtn { background: #28a745; }
         
-        /* Collapsible Section Styling */
+        /* Buttons */
+        button { background: #007bff; color: white; border: none; padding: 12px 20px; font-size: 16px; border-radius: 5px; cursor: pointer; margin: 5px; width: 100%; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        button#uploadBtn { background: #28a745; margin-top: 10px; }
+        button#rotateBtn { background: #6c757d; font-size: 14px; padding: 8px 16px; width: auto; display: inline-block; margin-bottom: 15px;}
+        button#wipeBtn { background: #dc3545; font-size: 14px; margin-top: 15px; } /* Red for Danger */
+
+        /* Collapsible Options */
         details { background: #f9f9f9; border-radius: 8px; margin: 15px 0; text-align: left; overflow: hidden; }
         summary { padding: 15px; font-weight: bold; cursor: pointer; user-select: none; background: #eee; list-style: none; }
         summary::after { content: '+'; float: right; font-weight: bold; }
@@ -24,18 +28,23 @@
         label { font-size: 14px; color: #555; }
         span.value { float: right; color: #007bff; font-weight: bold; font-size: 14px; }
         
-        #status { margin-top: 10px; font-weight: bold; color: #555; }
+        #status { margin-top: 10px; font-weight: bold; color: #555; min-height: 20px;}
     </style>
 </head>
 <body>
     <div class="container">
-        <h2>📷 E-Ink Gallery (Live)</h2>
+        <h2>📷 E-Ink Gallery</h2>
         
         <input type="file" id="fileInput" accept="image/*">
         
         <details open>
             <summary>Image Options</summary>
             <div class="controls">
+                
+                <div style="text-align:center; padding-bottom:10px; border-bottom:1px solid #ddd; margin-bottom:15px;">
+                    <button id="rotateBtn">↻ Rotate 90°</button>
+                </div>
+
                 <div class="slider-group">
                     <label>🎨 Saturation</label>
                     <span id="satValue" class="value">2.0x</span>
@@ -53,14 +62,17 @@
                     <span id="briValue" class="value">1.0x</span>
                     <input type="range" id="briSlider" min="0.5" max="2.0" step="0.1" value="1.0">
                 </div>
+
+                <div style="text-align:center; padding-top:10px; border-top:1px solid #ddd;">
+                    <button id="wipeBtn">🗑️ Wipe Gallery (Delete All)</button>
+                </div>
             </div>
         </details>
 
         <canvas id="previewCanvas" width="400" height="600"></canvas>
         <br>
-        <button id="processBtn">1. Convert to Dots</button>
-        <button id="uploadBtn" disabled>2. Upload via Bluetooth</button>
-        <div id="status">Waiting for image...</div>
+        <button id="uploadBtn" disabled>Upload via Bluetooth</button>
+        <div id="status">Select an image to begin.</div>
     </div>
 
 <script>
@@ -82,116 +94,70 @@
 
     let processedData = null; 
     let rawImg = null;
+    let debounceTimer = null;
+    let currentRotation = 0; 
 
     // Elements
     const fileInput = document.getElementById('fileInput');
     const canvas = document.getElementById('previewCanvas');
     const ctx = canvas.getContext('2d');
     const statusDiv = document.getElementById('status');
-    const processBtn = document.getElementById('processBtn');
     const uploadBtn = document.getElementById('uploadBtn');
+    const rotateBtn = document.getElementById('rotateBtn');
+    const wipeBtn = document.getElementById('wipeBtn');
 
     // Sliders
     const satSlider = document.getElementById('satSlider');
     const conSlider = document.getElementById('conSlider');
     const briSlider = document.getElementById('briSlider');
 
-    // --- LIVE PREVIEW FUNCTION ---
-    function updatePreview() {
+    // --- 1. LIVE PREVIEW ---
+    function updateLivePreview() {
         if (!rawImg) return;
         
-        // 1. Update Labels
         document.getElementById('satValue').textContent = satSlider.value + "x";
         document.getElementById('conValue').textContent = conSlider.value + "x";
         document.getElementById('briValue').textContent = briSlider.value + "x";
 
-        // 2. Apply Filters Instantly
         const sat = satSlider.value * 100;
         const con = conSlider.value * 100;
         const bri = briSlider.value * 100;
-        
         ctx.filter = `saturate(${sat}%) contrast(${con}%) brightness(${bri}%)`;
         
-        // 3. Redraw (Fast)
-        drawImageProp(ctx, rawImg, 0, 0, EPD_WIDTH, EPD_HEIGHT);
+        drawRotatedImage(ctx, rawImg, 0, 0, EPD_WIDTH, EPD_HEIGHT, currentRotation);
         
-        // Reset state so user knows they need to click "Convert" again
-        processBtn.textContent = "1. Convert to Dots (Required)";
-        processBtn.disabled = false;
         uploadBtn.disabled = true;
+        statusDiv.textContent = "Adjusting...";
+        
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(runHeavyProcessing, 500); 
     }
 
-    // Attach Listeners to sliders
-    satSlider.addEventListener('input', updatePreview);
-    conSlider.addEventListener('input', updatePreview);
-    briSlider.addEventListener('input', updatePreview);
+    // --- 2. HEAVY PROCESSING (Dither) ---
+    function runHeavyProcessing() {
+        if(!rawImg) return;
+        statusDiv.textContent = "Calculating dots...";
 
-    // 1. Load Image
-    fileInput.addEventListener('change', (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        const img = new Image();
-        img.onload = () => {
-            rawImg = img;
-            updatePreview(); // Show initial preview
-            statusDiv.textContent = "Image loaded.";
-        };
-        img.src = URL.createObjectURL(file);
-    });
-
-    // --- HELPER: CROP & FILL ---
-    function drawImageProp(ctx, img, x, y, w, h) {
-        const r = Math.min(w/img.width, h/img.height);
-        let nw = img.width*r, nh = img.height*r, ar=1;
-        if (nw < w) ar = w/nw;
-        if (Math.abs(ar-1) < 1e-14 && nh < h) ar = h/nh;
-        nw *= ar; nh *= ar;
-        const cx = (img.width-(img.width/(nw/w)))*0.5;
-        const cy = (img.height-(img.height/(nh/h)))*0.5;
-        const cw = img.width/(nw/w);
-        const ch = img.height/(nh/h);
-        ctx.drawImage(img, cx, cy, cw, ch, x, y, w, h);
-    }
-
-    // 2. Process (Dither)
-    processBtn.addEventListener('click', () => {
-        if(!rawImg) { statusDiv.textContent = "Select image first."; return; }
-
-        statusDiv.textContent = "Dithering...";
-        processBtn.disabled = true;
-
-        // Use setTimeout to allow UI to update text before freezing for calculation
         setTimeout(() => {
-            // Re-apply filters just in case (already applied by updatePreview, but context might reset)
             const sat = satSlider.value * 100;
             const con = conSlider.value * 100;
             const bri = briSlider.value * 100;
             ctx.filter = `saturate(${sat}%) contrast(${con}%) brightness(${bri}%)`;
-            drawImageProp(ctx, rawImg, 0, 0, EPD_WIDTH, EPD_HEIGHT);
+            
+            drawRotatedImage(ctx, rawImg, 0, 0, EPD_WIDTH, EPD_HEIGHT, currentRotation);
 
-            // Get Pixels
             const imageData = ctx.getImageData(0, 0, EPD_WIDTH, EPD_HEIGHT);
             const data = imageData.data;
             const outputBuffer = [];
             
-            // Floyd-Steinberg Dithering
             for (let y = 0; y < EPD_HEIGHT; y++) {
                 for (let x = 0; x < EPD_WIDTH; x++) {
                     const i = (y * EPD_WIDTH + x) * 4;
-                    const oldR = data[i];
-                    const oldG = data[i + 1];
-                    const oldB = data[i + 2];
-
+                    const oldR = data[i]; const oldG = data[i + 1]; const oldB = data[i + 2];
                     const closest = getClosestColor(oldR, oldG, oldB);
-                    
                     outputBuffer.push(closest[3]);
-
-                    const errR = oldR - closest[0];
-                    const errG = oldG - closest[1];
-                    const errB = oldB - closest[2];
-
+                    const errR = oldR - closest[0]; const errG = oldG - closest[1]; const errB = oldB - closest[2];
                     data[i] = closest[0]; data[i+1] = closest[1]; data[i+2] = closest[2];
-
                     distributeError(data, x + 1, y, errR, errG, errB, 7);
                     distributeError(data, x - 1, y + 1, errR, errG, errB, 3);
                     distributeError(data, x, y + 1, errR, errG, errB, 5);
@@ -199,11 +165,9 @@
                 }
             }
 
-            // Remove filter so we see the crisp dither dots
             ctx.filter = "none";
             ctx.putImageData(imageData, 0, 0);
 
-            // Pack Bits
             processedData = new Uint8Array(outputBuffer.length / 2);
             for (let i = 0; i < outputBuffer.length; i += 2) {
                 const p1 = outputBuffer[i];
@@ -211,16 +175,117 @@
                 processedData[i/2] = (p1 << 4) | p2;
             }
 
-            statusDiv.textContent = "Dithered! Ready to upload.";
-            processBtn.textContent = "1. Convert to Dots"; // Reset text
-            processBtn.disabled = false;
+            statusDiv.textContent = "Ready to Upload.";
             uploadBtn.disabled = false;
         }, 50);
+    }
+
+    // --- LISTENERS ---
+    satSlider.addEventListener('input', updateLivePreview);
+    conSlider.addEventListener('input', updateLivePreview);
+    briSlider.addEventListener('input', updateLivePreview);
+    
+    rotateBtn.addEventListener('click', () => {
+        currentRotation = (currentRotation + 90) % 360;
+        updateLivePreview();
+        clearTimeout(debounceTimer);
+        runHeavyProcessing();
     });
 
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const img = new Image();
+        img.onload = () => {
+            rawImg = img;
+            if(img.width > img.height) currentRotation = 90;
+            else currentRotation = 0;
+            updateLivePreview();
+            clearTimeout(debounceTimer);
+            runHeavyProcessing();
+        };
+        img.src = URL.createObjectURL(file);
+    });
+
+    // --- WIPE BUTTON LOGIC ---
+    wipeBtn.addEventListener('click', async () => {
+        if(!confirm("⚠️ Are you sure? This will delete ALL photos on the frame.")) return;
+        
+        try {
+            statusDiv.textContent = "Connecting to Wipe...";
+            const device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] });
+            const server = await device.gatt.connect();
+            const service = await server.getPrimaryService(SERVICE_UUID);
+            const characteristic = await service.getCharacteristic(CHAR_UUID);
+
+            statusDiv.textContent = "Sending Wipe Command...";
+            await characteristic.writeValue(new TextEncoder().encode("CLEAR"));
+            
+            statusDiv.textContent = "✅ Gallery Wiped!";
+            server.disconnect();
+        } catch (error) {
+            console.error(error);
+            statusDiv.textContent = "Error: " + error.message;
+        }
+    });
+
+    // --- UPLOAD LOGIC ---
+    uploadBtn.addEventListener('click', async () => {
+        try {
+            statusDiv.textContent = "Scanning...";
+            const device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] });
+            const server = await device.gatt.connect();
+            const service = await server.getPrimaryService(SERVICE_UUID);
+            const characteristic = await service.getCharacteristic(CHAR_UUID);
+
+            statusDiv.textContent = "Connected. Uploading...";
+            
+            // Send START
+            await characteristic.writeValue(new TextEncoder().encode("START"));
+            await new Promise(r => setTimeout(r, 50)); // Small delay after start command
+
+            // Send Data Loop
+            const chunkSize = 450; 
+            for (let i = 0; i < processedData.length; i += chunkSize) {
+                const chunk = processedData.slice(i, i + chunkSize);
+                await characteristic.writeValue(chunk);
+                await new Promise(r => setTimeout(r, 20)); // Stability Delay
+                const pct = Math.round((i / processedData.length) * 100);
+                statusDiv.textContent = `Uploading... ${pct}%`;
+            }
+
+            // Send END
+            await characteristic.writeValue(new TextEncoder().encode("END"));
+            statusDiv.textContent = "✅ Upload Complete!";
+            server.disconnect();
+
+        } catch (error) {
+            console.error(error);
+            statusDiv.textContent = "Error: " + error.message;
+        }
+    });
+
+    // --- GRAPHICS HELPERS ---
+    function drawRotatedImage(ctx, img, x, y, width, height, rotation) {
+        ctx.save();
+        ctx.translate(x + width / 2, y + height / 2);
+        ctx.rotate(rotation * Math.PI / 180);
+        const isRotated = (rotation === 90 || rotation === 270);
+        const imgW = img.width; const imgH = img.height;
+        const targetW = isRotated ? height : width;
+        const targetH = isRotated ? width : height;
+        const r = Math.min(targetW / imgW, targetH / imgH);
+        let nw = imgW * r, nh = imgH * r;
+        let ar = 1;
+        if (nw < targetW) ar = targetW / nw;
+        if (Math.abs(ar - 1) < 1e-14 && nh < targetH) ar = targetH / nh;
+        nw *= ar; nh *= ar;
+        ctx.drawImage(img, -nw / 2, -nh / 2, nw, nh);
+        ctx.restore();
+    }
+
     function getClosestColor(r, g, b) {
-        let minDist = Infinity;
-        let closest = PALETTE[1];
+        let minDist = Infinity; let closest = PALETTE[1];
         for (const col of PALETTE) {
             const dist = (r - col[0])**2 + (g - col[1])**2 + (b - col[2])**2;
             if (dist < minDist) { minDist = dist; closest = col; }
@@ -235,41 +300,6 @@
         data[i + 1] += (errG * factor) / 16;
         data[i + 2] += (errB * factor) / 16;
     }
-
-    // 3. Bluetooth Upload
-    uploadBtn.addEventListener('click', async () => {
-        try {
-            statusDiv.textContent = "Scanning...";
-            const device = await navigator.bluetooth.requestDevice({
-                filters: [{ services: [SERVICE_UUID] }]
-            });
-            const server = await device.gatt.connect();
-            const service = await server.getPrimaryService(SERVICE_UUID);
-            const characteristic = await service.getCharacteristic(CHAR_UUID);
-
-            statusDiv.textContent = "Connected. Uploading...";
-            
-            await characteristic.writeValue(new TextEncoder().encode("START"));
-            
-            const chunkSize = 512; 
-            for (let i = 0; i < processedData.length; i += chunkSize) {
-                const chunk = processedData.slice(i, i + chunkSize);
-                await characteristic.writeValue(chunk); 
-                
-                const pct = Math.round((i / processedData.length) * 100);
-                statusDiv.textContent = `Uploading... ${pct}%`;
-            }
-
-            await characteristic.writeValue(new TextEncoder().encode("END"));
-            statusDiv.textContent = "Upload Complete!";
-            
-            server.disconnect();
-
-        } catch (error) {
-            console.error(error);
-            statusDiv.textContent = "Error: " + error.message;
-        }
-    });
 </script>
 </body>
 </html>
