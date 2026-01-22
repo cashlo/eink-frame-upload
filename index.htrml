@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>E-Ink Gallery (Live Preview)</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #f0f0f0; padding: 20px; }
+        .container { max-width: 500px; margin: auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        canvas { border: 1px solid #ccc; max-width: 100%; height: auto; margin: 10px 0; }
+        button { background: #007bff; color: white; border: none; padding: 12px 20px; font-size: 16px; border-radius: 5px; cursor: pointer; margin: 5px; width: 100%; }
+        button:disabled { background: #ccc; }
+        button#uploadBtn { background: #28a745; }
+        
+        /* Collapsible Section Styling */
+        details { background: #f9f9f9; border-radius: 8px; margin: 15px 0; text-align: left; overflow: hidden; }
+        summary { padding: 15px; font-weight: bold; cursor: pointer; user-select: none; background: #eee; list-style: none; }
+        summary::after { content: '+'; float: right; font-weight: bold; }
+        details[open] summary::after { content: '-'; }
+        
+        .controls { padding: 15px; }
+        .slider-group { margin-bottom: 15px; }
+        input[type=range] { width: 100%; margin: 5px 0; cursor: pointer; }
+        label { font-size: 14px; color: #555; }
+        span.value { float: right; color: #007bff; font-weight: bold; font-size: 14px; }
+        
+        #status { margin-top: 10px; font-weight: bold; color: #555; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>📷 E-Ink Gallery (Live)</h2>
+        
+        <input type="file" id="fileInput" accept="image/*">
+        
+        <details open>
+            <summary>Image Options</summary>
+            <div class="controls">
+                <div class="slider-group">
+                    <label>🎨 Saturation</label>
+                    <span id="satValue" class="value">2.0x</span>
+                    <input type="range" id="satSlider" min="0.0" max="4.0" step="0.1" value="2.0">
+                </div>
+
+                <div class="slider-group">
+                    <label>🌓 Contrast</label>
+                    <span id="conValue" class="value">1.2x</span>
+                    <input type="range" id="conSlider" min="0.5" max="2.0" step="0.1" value="1.2">
+                </div>
+
+                <div class="slider-group">
+                    <label>☀️ Brightness</label>
+                    <span id="briValue" class="value">1.0x</span>
+                    <input type="range" id="briSlider" min="0.5" max="2.0" step="0.1" value="1.0">
+                </div>
+            </div>
+        </details>
+
+        <canvas id="previewCanvas" width="400" height="600"></canvas>
+        <br>
+        <button id="processBtn">1. Convert to Dots</button>
+        <button id="uploadBtn" disabled>2. Upload via Bluetooth</button>
+        <div id="status">Waiting for image...</div>
+    </div>
+
+<script>
+    // --- CONFIGURATION ---
+    const EPD_WIDTH = 400;
+    const EPD_HEIGHT = 600;
+    const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+    const CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+    // --- PALETTE (Spectra 6) ---
+    const PALETTE = [
+        [0, 0, 0, 0x0],       // Black
+        [255, 255, 255, 0x1], // White
+        [255, 255, 0, 0x2],   // Yellow
+        [255, 0, 0, 0x3],     // Red
+        [0, 0, 255, 0x5],     // Blue
+        [0, 255, 0, 0x6]      // Green
+    ];
+
+    let processedData = null; 
+    let rawImg = null;
+
+    // Elements
+    const fileInput = document.getElementById('fileInput');
+    const canvas = document.getElementById('previewCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusDiv = document.getElementById('status');
+    const processBtn = document.getElementById('processBtn');
+    const uploadBtn = document.getElementById('uploadBtn');
+
+    // Sliders
+    const satSlider = document.getElementById('satSlider');
+    const conSlider = document.getElementById('conSlider');
+    const briSlider = document.getElementById('briSlider');
+
+    // --- LIVE PREVIEW FUNCTION ---
+    function updatePreview() {
+        if (!rawImg) return;
+        
+        // 1. Update Labels
+        document.getElementById('satValue').textContent = satSlider.value + "x";
+        document.getElementById('conValue').textContent = conSlider.value + "x";
+        document.getElementById('briValue').textContent = briSlider.value + "x";
+
+        // 2. Apply Filters Instantly
+        const sat = satSlider.value * 100;
+        const con = conSlider.value * 100;
+        const bri = briSlider.value * 100;
+        
+        ctx.filter = `saturate(${sat}%) contrast(${con}%) brightness(${bri}%)`;
+        
+        // 3. Redraw (Fast)
+        drawImageProp(ctx, rawImg, 0, 0, EPD_WIDTH, EPD_HEIGHT);
+        
+        // Reset state so user knows they need to click "Convert" again
+        processBtn.textContent = "1. Convert to Dots (Required)";
+        processBtn.disabled = false;
+        uploadBtn.disabled = true;
+    }
+
+    // Attach Listeners to sliders
+    satSlider.addEventListener('input', updatePreview);
+    conSlider.addEventListener('input', updatePreview);
+    briSlider.addEventListener('input', updatePreview);
+
+    // 1. Load Image
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const img = new Image();
+        img.onload = () => {
+            rawImg = img;
+            updatePreview(); // Show initial preview
+            statusDiv.textContent = "Image loaded.";
+        };
+        img.src = URL.createObjectURL(file);
+    });
+
+    // --- HELPER: CROP & FILL ---
+    function drawImageProp(ctx, img, x, y, w, h) {
+        const r = Math.min(w/img.width, h/img.height);
+        let nw = img.width*r, nh = img.height*r, ar=1;
+        if (nw < w) ar = w/nw;
+        if (Math.abs(ar-1) < 1e-14 && nh < h) ar = h/nh;
+        nw *= ar; nh *= ar;
+        const cx = (img.width-(img.width/(nw/w)))*0.5;
+        const cy = (img.height-(img.height/(nh/h)))*0.5;
+        const cw = img.width/(nw/w);
+        const ch = img.height/(nh/h);
+        ctx.drawImage(img, cx, cy, cw, ch, x, y, w, h);
+    }
+
+    // 2. Process (Dither)
+    processBtn.addEventListener('click', () => {
+        if(!rawImg) { statusDiv.textContent = "Select image first."; return; }
+
+        statusDiv.textContent = "Dithering...";
+        processBtn.disabled = true;
+
+        // Use setTimeout to allow UI to update text before freezing for calculation
+        setTimeout(() => {
+            // Re-apply filters just in case (already applied by updatePreview, but context might reset)
+            const sat = satSlider.value * 100;
+            const con = conSlider.value * 100;
+            const bri = briSlider.value * 100;
+            ctx.filter = `saturate(${sat}%) contrast(${con}%) brightness(${bri}%)`;
+            drawImageProp(ctx, rawImg, 0, 0, EPD_WIDTH, EPD_HEIGHT);
+
+            // Get Pixels
+            const imageData = ctx.getImageData(0, 0, EPD_WIDTH, EPD_HEIGHT);
+            const data = imageData.data;
+            const outputBuffer = [];
+            
+            // Floyd-Steinberg Dithering
+            for (let y = 0; y < EPD_HEIGHT; y++) {
+                for (let x = 0; x < EPD_WIDTH; x++) {
+                    const i = (y * EPD_WIDTH + x) * 4;
+                    const oldR = data[i];
+                    const oldG = data[i + 1];
+                    const oldB = data[i + 2];
+
+                    const closest = getClosestColor(oldR, oldG, oldB);
+                    
+                    outputBuffer.push(closest[3]);
+
+                    const errR = oldR - closest[0];
+                    const errG = oldG - closest[1];
+                    const errB = oldB - closest[2];
+
+                    data[i] = closest[0]; data[i+1] = closest[1]; data[i+2] = closest[2];
+
+                    distributeError(data, x + 1, y, errR, errG, errB, 7);
+                    distributeError(data, x - 1, y + 1, errR, errG, errB, 3);
+                    distributeError(data, x, y + 1, errR, errG, errB, 5);
+                    distributeError(data, x + 1, y + 1, errR, errG, errB, 1);
+                }
+            }
+
+            // Remove filter so we see the crisp dither dots
+            ctx.filter = "none";
+            ctx.putImageData(imageData, 0, 0);
+
+            // Pack Bits
+            processedData = new Uint8Array(outputBuffer.length / 2);
+            for (let i = 0; i < outputBuffer.length; i += 2) {
+                const p1 = outputBuffer[i];
+                const p2 = (i + 1 < outputBuffer.length) ? outputBuffer[i+1] : 0x1;
+                processedData[i/2] = (p1 << 4) | p2;
+            }
+
+            statusDiv.textContent = "Dithered! Ready to upload.";
+            processBtn.textContent = "1. Convert to Dots"; // Reset text
+            processBtn.disabled = false;
+            uploadBtn.disabled = false;
+        }, 50);
+    });
+
+    function getClosestColor(r, g, b) {
+        let minDist = Infinity;
+        let closest = PALETTE[1];
+        for (const col of PALETTE) {
+            const dist = (r - col[0])**2 + (g - col[1])**2 + (b - col[2])**2;
+            if (dist < minDist) { minDist = dist; closest = col; }
+        }
+        return closest;
+    }
+
+    function distributeError(data, x, y, errR, errG, errB, factor) {
+        if (x < 0 || x >= EPD_WIDTH || y >= EPD_HEIGHT) return;
+        const i = (y * EPD_WIDTH + x) * 4;
+        data[i] += (errR * factor) / 16;
+        data[i + 1] += (errG * factor) / 16;
+        data[i + 2] += (errB * factor) / 16;
+    }
+
+    // 3. Bluetooth Upload
+    uploadBtn.addEventListener('click', async () => {
+        try {
+            statusDiv.textContent = "Scanning...";
+            const device = await navigator.bluetooth.requestDevice({
+                filters: [{ services: [SERVICE_UUID] }]
+            });
+            const server = await device.gatt.connect();
+            const service = await server.getPrimaryService(SERVICE_UUID);
+            const characteristic = await service.getCharacteristic(CHAR_UUID);
+
+            statusDiv.textContent = "Connected. Uploading...";
+            
+            await characteristic.writeValue(new TextEncoder().encode("START"));
+            
+            const chunkSize = 512; 
+            for (let i = 0; i < processedData.length; i += chunkSize) {
+                const chunk = processedData.slice(i, i + chunkSize);
+                await characteristic.writeValue(chunk); 
+                
+                const pct = Math.round((i / processedData.length) * 100);
+                statusDiv.textContent = `Uploading... ${pct}%`;
+            }
+
+            await characteristic.writeValue(new TextEncoder().encode("END"));
+            statusDiv.textContent = "Upload Complete!";
+            
+            server.disconnect();
+
+        } catch (error) {
+            console.error(error);
+            statusDiv.textContent = "Error: " + error.message;
+        }
+    });
+</script>
+</body>
+</html>
