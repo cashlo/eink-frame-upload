@@ -249,7 +249,6 @@
             for (let i = 0; i < processedData.length; i += chunkSize) {
                 const chunk = processedData.slice(i, i + chunkSize);
                 await characteristic.writeValue(chunk);
-                await new Promise(r => setTimeout(r, 20)); // Stability Delay
                 const pct = Math.round((i / processedData.length) * 100);
                 statusDiv.textContent = `Uploading... ${pct}%`;
             }
